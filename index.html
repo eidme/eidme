@@ -1,0 +1,1385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>App Studio</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Font: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <meta id="theme-color-meta" name="theme-color" content="#ffffff">
+  <link id="apple-touch-icon-link" rel="apple-touch-icon" href="">
+  <link id="favicon-link" rel="icon" href="">
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          boxShadow: {
+            'card': '0 2px 10px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.03)',
+            'float': '0 12px 30px -4px rgba(15, 23, 42, 0.12), 0 4px 12px rgba(15, 23, 42, 0.06)',
+            'subtle': '0 1px 2px rgba(0, 0, 0, 0.05)',
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    * {
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    input, textarea {
+      user-select: text;
+    }
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow-x: hidden;
+      background-color: #f8fafc;
+    }
+    /* Full height edge-to-edge standalone phone ratio frame */
+    #child-frame {
+      display: none;
+      width: 100%;
+      height: 100%;
+      min-height: 100dvh;
+      border: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: 0px;
+      padding-left: 0px;
+      padding-right: 0px;
+      box-sizing: border-box;
+      z-index: 10000;
+    }
+    #launch-splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 99999;
+      transition: opacity 0.3s ease-out;
+    }
+    #launch-splash.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .hide-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .hide-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+
+  <script>
+    // Turso Cloud Database Configuration
+    const TURSO_ENDPOINT = "https://websitexd-eidmeturso.aws-ap-south-1.turso.io/v2/pipeline";
+    const TURSO_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3OTA1ODA2MzgsImlkIjoiMDFhMGU2ZWMtMmMwMS03ZDAyLThkMjItZjllMzk2MWJhZjczIiwia2lkIjoicm9ENkhSd1RGUUJnSS1iVG83SjlGaUV4SzlnaWtkVDBzX1pLSzRlVEdhQSIsInJpZCI6IjFiN2E2ZTAzLTM1NGUtNDZmNy1iMzI5LTQyMmY4M2JjMjU1MCJ9.vCPP5iXuYoUwsEGj8wmYiQA9MRFR0f3suvuAP6mycibbEgypXXI1BbLTbXxPjNeaY-8kp8jVHhqpq6SoqRilDQ";
+
+    // Helper to query Turso HTTP Pipeline
+    async function queryTurso(sql, args = []) {
+      const formattedArgs = args.map(val => {
+        if (val === null || val === undefined) return { type: "null" };
+        if (typeof val === "number") return { type: "integer", value: String(Math.floor(val)) };
+        return { type: "text", value: String(val) };
+      });
+
+      const response = await fetch(TURSO_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${TURSO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              type: "execute",
+              stmt: {
+                sql: sql,
+                args: formattedArgs
+              }
+            },
+            { type: "close" }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Turso connection failed: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      const firstResult = data.results && data.results[0];
+      if (firstResult && firstResult.type === "error") {
+        throw new Error(firstResult.error ? firstResult.error.message : "Database error");
+      }
+      return firstResult && firstResult.response ? firstResult.response.result : null;
+    }
+
+    async function ensureTableExists() {
+      try {
+        await queryTurso(`
+          CREATE TABLE IF NOT EXISTS apps (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            icon TEXT,
+            color TEXT,
+            code TEXT NOT NULL,
+            created_at INTEGER,
+            is_temp INTEGER DEFAULT 0
+          );
+        `);
+
+        try {
+          await queryTurso(`ALTER TABLE apps ADD COLUMN is_temp INTEGER DEFAULT 0;`);
+        } catch (e) {
+          // Column already exists
+        }
+
+        await queryTurso(`
+          CREATE TABLE IF NOT EXISTS hosted_links (
+            token TEXT PRIMARY KEY,
+            app_id TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+        `);
+      } catch (err) {
+        console.warn("Could not verify Turso tables:", err);
+      }
+    }
+    ensureTableExists();
+
+    (async function checkChildRoute() {
+      const urlParams = new URLSearchParams(window.location.search);
+      let targetId = urlParams.get('app') || urlParams.get('temp');
+      let linkToken = urlParams.get('link');
+
+      if (!targetId && !linkToken && window.location.hash) {
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+        targetId = hashParams.get('app') || hashParams.get('temp') || hashParams.get('id');
+        linkToken = hashParams.get('link');
+      }
+
+      if (!targetId && !linkToken) return;
+
+      const preHideStyle = document.createElement('style');
+      preHideStyle.id = 'preHideStyle';
+      preHideStyle.textContent = '#parent-studio-ui { display: none !important; }';
+      document.head.appendChild(preHideStyle);
+
+      function mountWhenReady(callback) {
+        if (document.readyState === 'interactive' || document.readyState === 'complete') {
+          callback();
+        } else {
+          document.addEventListener('DOMContentLoaded', callback, { once: true });
+        }
+      }
+
+      try {
+        let app = null;
+
+        // If visiting via temporary hosted link
+        if (linkToken) {
+          const hostResult = await queryTurso(
+            "SELECT h.expires_at, a.name, a.icon, a.color, a.code FROM hosted_links h JOIN apps a ON h.app_id = a.id WHERE h.token = ? LIMIT 1;",
+            [linkToken]
+          );
+
+          if (!hostResult || !hostResult.rows || hostResult.rows.length === 0) {
+            throw new Error("Hosted link not found or was removed.");
+          }
+
+          const hRow = hostResult.rows[0];
+          const expiresAt = Number(hRow[0]?.value) || 0;
+          const now = Date.now();
+
+          // Check if link has expired
+          if (now > expiresAt) {
+            const expDate = new Date(expiresAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+            mountWhenReady(() => {
+              if (preHideStyle.parentNode) preHideStyle.parentNode.removeChild(preHideStyle);
+              document.body.innerHTML = `
+                <div class="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 text-center font-sans">
+                  <div class="bg-slate-800/90 border border-slate-700/80 p-8 rounded-3xl max-w-xs w-full shadow-2xl backdrop-blur-md">
+                    <div class="w-14 h-14 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-2xl flex items-center justify-center text-2xl mx-auto mb-4">⏳</div>
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-rose-400 bg-rose-950/60 border border-rose-800/60 px-2.5 py-0.5 rounded-full inline-block mb-2">Temporary Host Expired</div>
+                    <h1 class="text-base font-extrabold text-white mb-2">Link Has Expired</h1>
+                    <p class="text-slate-400 text-xs mb-1">This temporary public link expired on:</p>
+                    <p class="text-xs font-mono font-bold text-slate-200 mb-6">${expDate}</p>
+                    <p class="text-[11px] text-slate-500">Contact the creator to request a new temporary preview link.</p>
+                  </div>
+                </div>
+              `;
+            });
+            return;
+          }
+
+          app = {
+            name: hRow[1]?.value || "Hosted App",
+            icon: hRow[2]?.value || "",
+            color: hRow[3]?.value || "#0f172a",
+            code: hRow[4]?.value || "",
+            isTemp: false
+          };
+        } else {
+          // Standard child app retrieval from Turso database
+          const result = await queryTurso("SELECT name, icon, color, code, is_temp FROM apps WHERE id = ? LIMIT 1;", [targetId]);
+          if (!result || !result.rows || result.rows.length === 0) {
+            throw new Error("App not found in cloud database.");
+          }
+
+          const row = result.rows[0];
+          app = {
+            name: row[0]?.value || "My App",
+            icon: row[1]?.value || "",
+            color: row[2]?.value || "#0f172a",
+            code: row[3]?.value || "",
+            isTemp: row[4]?.value === "1" || row[4]?.value === 1
+          };
+        }
+
+        document.title = app.name;
+
+        const standaloneMetas = [
+          { name: 'apple-mobile-web-app-capable', content: 'yes' },
+          { name: 'mobile-web-app-capable', content: 'yes' },
+          { name: 'apple-mobile-web-app-status-bar-style', content: 'default' },
+          { name: 'apple-mobile-web-app-title', content: app.name }
+        ];
+
+        standaloneMetas.forEach(meta => {
+          let el = document.querySelector(`meta[name="${meta.name}"]`);
+          if (!el) {
+            el = document.createElement('meta');
+            el.name = meta.name;
+            document.head.appendChild(el);
+          }
+          el.content = meta.content;
+        });
+
+        const themeMeta = document.getElementById('theme-color-meta');
+        if (themeMeta) themeMeta.setAttribute('content', app.color);
+        document.documentElement.style.backgroundColor = app.color;
+        document.body.style.backgroundColor = app.color;
+
+        const fallbackSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="${app.color}"/><text y=".9em" x="50%" text-anchor="middle" font-size="70">⚡</text></svg>`;
+        const fallbackIcon = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(fallbackSvg)}`;
+        let effectiveIcon = (app.icon && app.icon.trim()) ? app.icon.trim() : fallbackIcon;
+
+        const appleIconLink = document.getElementById('apple-touch-icon-link');
+        if (appleIconLink) appleIconLink.href = effectiveIcon;
+
+        let precomposed = document.getElementById('apple-touch-icon-precomposed');
+        if (!precomposed) {
+          precomposed = document.createElement('link');
+          precomposed.id = 'apple-touch-icon-precomposed';
+          precomposed.rel = 'apple-touch-icon-precomposed';
+          document.head.appendChild(precomposed);
+        }
+        precomposed.href = effectiveIcon;
+
+        const faviconLink = document.getElementById('favicon-link');
+        if (faviconLink) faviconLink.href = effectiveIcon;
+
+        const childManifest = {
+          name: app.name,
+          short_name: app.name,
+          start_url: window.location.href,
+          scope: window.location.href,
+          display: "standalone",
+          orientation: "any",
+          background_color: app.color,
+          theme_color: app.color,
+          icons: [
+            { src: effectiveIcon, sizes: "192x192", type: "image/png", purpose: "any maskable" },
+            { src: effectiveIcon, sizes: "512x512", type: "image/png", purpose: "any maskable" }
+          ]
+        };
+
+        let manifestLink = document.getElementById('child-manifest-link');
+        if (!manifestLink) {
+          manifestLink = document.createElement('link');
+          manifestLink.id = 'child-manifest-link';
+          manifestLink.rel = 'manifest';
+          document.head.appendChild(manifestLink);
+        }
+        manifestLink.href = 'data:application/manifest+json;charset=utf-8,' + encodeURIComponent(JSON.stringify(childManifest));
+
+        mountWhenReady(() => {
+          const parentUi = document.getElementById('parent-studio-ui');
+          if (parentUi) parentUi.remove();
+
+          const splash = document.createElement('div');
+          splash.id = 'launch-splash';
+          splash.style.backgroundColor = app.color;
+          splash.innerHTML = `
+            <div style="display:flex;flex-direction:column;align-items:center;gap:14px;">
+              <img src="${effectiveIcon}" style="width:68px;height:68px;border-radius:18px;box-shadow:0 8px 24px rgba(0,0,0,0.18);object-fit:cover;" onerror="this.style.display='none'">
+              <div style="width:22px;height:22px;border:2.5px solid rgba(255,255,255,0.25);border-top-color:#fff;border-radius:50%;animation:spin 0.7s linear infinite;"></div>
+            </div>
+            <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+          `;
+          document.body.appendChild(splash);
+
+          const frame = document.getElementById('child-frame');
+          frame.style.display = 'block';
+          frame.style.backgroundColor = app.color;
+          frame.setAttribute('allow', 'fullscreen; geolocation; microphone; camera; midi');
+
+          frame.onload = () => {
+            splash.classList.add('fade-out');
+            setTimeout(() => splash.remove(), 280);
+          };
+
+          // Full phone ratio style injection: status safe area on top, completely open at bottom
+          const safeWrapper = `
+            <style>
+              :root {
+                --sat: env(safe-area-inset-top, 0px);
+              }
+              html, body {
+                margin: 0 !important;
+                padding-top: var(--sat) !important;
+                padding-bottom: 0px !important;
+                min-height: 100dvh !important;
+                box-sizing: border-box !important;
+              }
+            </style>
+          `;
+          
+          let patchedCode = app.code;
+          if (patchedCode.includes('<head>')) {
+            patchedCode = patchedCode.replace('<head>', '<head>' + safeWrapper);
+          } else {
+            patchedCode = safeWrapper + patchedCode;
+          }
+
+          frame.srcdoc = patchedCode;
+        });
+
+      } catch (err) {
+        console.error("Child app loading error:", err);
+        mountWhenReady(() => {
+          if (preHideStyle.parentNode) preHideStyle.parentNode.removeChild(preHideStyle);
+          document.body.innerHTML = `
+            <div class="min-h-screen bg-slate-50 text-slate-800 flex flex-col items-center justify-center p-6 text-center font-sans">
+              <div class="bg-white border border-slate-200/90 p-8 rounded-3xl max-w-xs w-full shadow-card">
+                <div class="w-12 h-12 bg-amber-50 text-amber-500 rounded-2xl flex items-center justify-center text-xl mx-auto mb-3">🔍</div>
+                <h1 class="text-base font-extrabold text-slate-900 mb-1">App Not Found</h1>
+                <p class="text-slate-500 text-xs mb-5">Could not retrieve this app from Turso cloud database.</p>
+                <a href="${window.location.origin + window.location.pathname}" class="inline-block w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-bold transition-all shadow-subtle">Return to Studio</a>
+              </div>
+            </div>
+          `;
+        });
+      }
+    })();
+  </script>
+</head>
+<body class="bg-[#f8fafc] text-slate-800 min-h-screen font-sans selection:bg-slate-200 flex flex-col antialiased">
+
+  <!-- Fullscreen Child App Standalone Frame -->
+  <iframe id="child-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"></iframe>
+
+  <div id="parent-studio-ui" class="flex-1 flex flex-col w-full max-w-md mx-auto min-h-screen bg-white border-x border-slate-200/60 shadow-subtle relative pb-24">
+
+    <!-- App Mobile Top Navigation Header -->
+    <header class="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-100 px-5 pt-3 pb-3 flex items-center justify-between">
+      <div class="flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-xl bg-slate-950 text-white flex items-center justify-center font-bold text-xs shadow-subtle">
+          ⚡
+        </div>
+        <div>
+          <h1 class="text-sm font-extrabold text-slate-900 leading-tight">App Studio</h1>
+          <div class="flex items-center gap-1.5 mt-0.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span class="text-[10px] font-medium text-slate-400">Turso Connected</span>
+          </div>
+        </div>
+      </div>
+
+      <button id="btnClearCurrent" type="button" class="px-2.5 py-1 rounded-xl bg-slate-100/80 hover:bg-slate-200 text-slate-600 font-semibold text-xs transition-all active:scale-95">
+        Reset
+      </button>
+    </header>
+
+    <!-- TAB 1: Studio App Creator View -->
+    <section id="viewStudio" class="tab-view flex-1 flex flex-col p-4 space-y-4">
+      
+      <!-- App Meta Configuration Card -->
+      <div class="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-card">
+        <div class="text-[11px] font-bold uppercase tracking-wider text-slate-400 mb-3">App Configuration</div>
+        
+        <div class="space-y-3">
+          <!-- App Name -->
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">App Name</label>
+            <input type="text" id="inputTitle" placeholder="e.g. Metric Converter" class="w-full bg-slate-50/70 border border-slate-200/90 focus:border-slate-800 focus:bg-white rounded-xl px-3.5 py-2 text-xs font-medium text-slate-900 placeholder-slate-400 outline-none transition-all">
+          </div>
+
+          <!-- App Icon URL & Live Preview -->
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Icon URL</label>
+            <div class="flex items-center gap-2">
+              <input type="url" id="inputIconUrl" placeholder="https://example.com/icon.png" class="flex-1 bg-slate-50/70 border border-slate-200/90 focus:border-slate-800 focus:bg-white rounded-xl px-3.5 py-2 text-xs font-medium text-slate-900 placeholder-slate-400 outline-none transition-all">
+              <div id="iconMiniPreview" class="w-8 h-8 rounded-xl border border-slate-200 bg-slate-100 flex items-center justify-center overflow-hidden shrink-0">
+                <span id="iconMiniPlaceholder" class="text-xs text-slate-400">🖼️</span>
+                <img id="iconMiniImg" src="" alt="Icon" class="w-full h-full object-cover hidden">
+              </div>
+            </div>
+          </div>
+
+          <!-- Splash & Background Theme Color -->
+          <div>
+            <label class="block text-xs font-semibold text-slate-700 mb-1">Theme / Background Color</label>
+            <div class="flex items-center gap-2">
+              <input type="color" id="inputColorPicker" value="#0f172a" class="w-8 h-8 p-0.5 rounded-xl border border-slate-300 bg-white cursor-pointer shrink-0">
+              <input type="text" id="inputThemeColor" value="#0f172a" placeholder="#0f172a" class="flex-1 bg-slate-50/70 border border-slate-200/90 focus:border-slate-800 focus:bg-white rounded-xl px-3 py-2 text-xs font-mono font-medium text-slate-900 outline-none transition-all">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-card flex flex-col flex-1">
+        
+        <!-- Header with Paste and Delete buttons ONLY -->
+        <div class="flex items-center justify-between mb-2.5">
+          <label class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+            <span>Code Workspace</span>
+            <span id="codeCharCounter" class="text-[10px] font-mono font-normal text-slate-400">(0 chars)</span>
+          </label>
+          
+          <div class="flex items-center gap-1.5">
+            <button id="btnPasteCode" type="button" class="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100/90 text-emerald-700 border border-emerald-200/90 font-bold text-[11px] active:scale-95 transition-all shadow-subtle flex items-center gap-1">
+              <span>📋 Paste</span>
+            </button>
+            <button id="btnDeleteCode" type="button" class="px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200/80 font-bold text-[11px] active:scale-95 transition-all shadow-subtle flex items-center gap-1">
+              <span>🗑️ Delete</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Readonly Code Input Area (Manipulated solely via Paste and Delete) -->
+        <textarea id="inputCode" readonly rows="10" placeholder="Click 'Paste' above to load your HTML / CSS / JS code into the workspace..." class="w-full flex-1 bg-slate-900 text-slate-100 border border-slate-800 rounded-xl p-3 text-xs font-mono placeholder-slate-500 outline-none resize-none leading-relaxed transition-all cursor-default select-all"></textarea>
+      </div>
+
+      <!-- Creation Action Triggers -->
+      <div class="grid grid-cols-2 gap-2 pt-1">
+        <button id="btnCreateApp" type="button" class="py-3 px-3 rounded-2xl bg-slate-950 hover:bg-slate-800 active:scale-95 text-white font-bold text-xs shadow-subtle transition-all flex items-center justify-center gap-1.5">
+          <span id="btnCreateIcon">💾</span>
+          <span id="btnCreateText">Save to Cloud</span>
+          <span id="btnCreateSpinner" class="hidden animate-spin">⏳</span>
+        </button>
+
+        <button id="btnCreateTempApp" type="button" class="py-3 px-3 rounded-2xl bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold text-xs shadow-subtle transition-all flex items-center justify-center gap-1.5">
+          <span>⚡</span>
+          <span>Add Temp Site</span>
+          <span id="btnTempSpinner" class="hidden animate-spin">⏳</span>
+        </button>
+      </div>
+    </section>
+
+    <section id="viewSites" class="tab-view flex-1 flex flex-col p-4 hidden space-y-3">
+      
+      <!-- In-App Segmented Switcher (Saved vs Temp) -->
+      <div class="bg-slate-100/90 p-1 rounded-2xl flex items-center justify-between border border-slate-200/60">
+        <button id="tabFilterSaved" type="button" class="flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 bg-white text-slate-900 shadow-subtle">
+          <span>Saved Cloud Sites</span>
+          <span id="countSavedBadge" class="bg-slate-100 text-slate-700 text-[10px] font-mono px-1.5 py-0.2 rounded-md">0</span>
+        </button>
+
+        <button id="tabFilterTemp" type="button" class="flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 text-slate-500 hover:text-slate-800">
+          <span>Temp Sites</span>
+          <span id="countTempBadge" class="bg-slate-200 text-slate-600 text-[10px] font-mono px-1.5 py-0.2 rounded-md">0</span>
+        </button>
+      </div>
+
+      <!-- Sync Status Bar -->
+      <div class="flex items-center justify-between px-1 text-[11px] text-slate-400">
+        <span id="librarySubtitle">Showing cloud apps stored in Turso</span>
+        <button id="btnSyncTurso" type="button" class="hover:text-slate-700 font-semibold flex items-center gap-1">
+          <span>🔄 Sync</span>
+        </button>
+      </div>
+
+      <!-- Sites Cards Dynamic Container -->
+      <div id="sitesListContainer" class="flex-1 space-y-2.5 overflow-y-auto hide-scrollbar pb-6">
+        <!-- Generated Cards inserted dynamically -->
+      </div>
+
+      <!-- Empty State -->
+      <div id="noSitesEmptyState" class="hidden flex-1 flex flex-col items-center justify-center py-12 text-center">
+        <div id="emptyStateIcon" class="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-2xl mb-3 text-slate-400">
+          📂
+        </div>
+        <h3 id="emptyStateTitle" class="text-sm font-bold text-slate-700">No sites found</h3>
+        <p id="emptyStateDesc" class="text-xs text-slate-400 max-w-xs mt-1 mb-4">You haven't created any apps yet.</p>
+        <button id="btnEmptyGoCreate" class="px-4 py-2 rounded-xl bg-slate-900 text-white font-bold text-xs shadow-subtle active:scale-95 transition-all">
+          Create App Now
+        </button>
+      </div>
+    </section>
+
+    <nav class="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/80 max-w-md mx-auto">
+      <div class="grid grid-cols-2 h-16 px-4">
+        
+        <!-- Tab 1: Studio -->
+        <button type="button" class="bottom-tab-btn flex flex-col items-center justify-center text-slate-900 font-bold active:scale-95 transition-all" data-tab="viewStudio">
+          <span class="text-base">🛠️</span>
+          <span class="text-[11px] mt-0.5">Studio</span>
+        </button>
+
+        <!-- Tab 2: Sites (Strictly site name only, no count badges) -->
+        <button type="button" class="bottom-tab-btn flex flex-col items-center justify-center text-slate-400 hover:text-slate-700 font-semibold active:scale-95 transition-all" data-tab="viewSites">
+          <span class="text-base">📱</span>
+          <span class="text-[11px] mt-0.5">Sites</span>
+        </button>
+
+      </div>
+    </nav>
+  </div>
+
+  <!-- Direct App Ready / Run Modal -->
+  <div id="modalOverlay" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-white border border-slate-200/90 rounded-3xl p-6 max-w-xs w-full shadow-float text-center flex flex-col items-center animate-in fade-in zoom-in-95 duration-150">
+      <div id="modalIconContainer" class="w-16 h-16 rounded-2xl bg-slate-900 text-white flex items-center justify-center overflow-hidden mb-3 shadow-subtle">
+        <img id="modalIconImg" src="" alt="App Icon" class="w-full h-full object-cover hidden">
+        <span id="modalIconFallback" class="text-2xl">⚡</span>
+      </div>
+      
+      <div id="modalBadge" class="text-[10px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full mb-1">Saved to Turso</div>
+      <h3 id="modalAppTitle" class="text-base font-extrabold text-slate-900 mb-1">App Ready</h3>
+      <p id="modalAppDesc" class="text-xs text-slate-500 mb-5">Your app is synced and ready to run.</p>
+      
+      <div class="flex flex-col w-full gap-2">
+        <a id="btnModalOpen" target="_blank" href="#" class="w-full py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-bold text-xs transition-all shadow-subtle flex items-center justify-center gap-1.5">
+          <span>Open App Now</span>
+          <span>↗</span>
+        </a>
+        <button id="btnModalClose" type="button" class="w-full py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-all active:scale-95">
+          Done
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Confirmation Modal -->
+  <div id="confirmDeleteModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-white border border-slate-200/90 rounded-3xl p-6 max-w-xs w-full shadow-float text-center flex flex-col items-center animate-in fade-in zoom-in-95 duration-150">
+      <div class="w-14 h-14 rounded-2xl bg-rose-50 text-rose-500 border border-rose-100 flex items-center justify-center mb-3 text-2xl font-bold shadow-xs">
+        🗑️
+      </div>
+      <h3 class="text-base font-extrabold text-slate-900 mb-1">Delete Site?</h3>
+      <p class="text-xs text-slate-500 mb-1">Are you sure you want to permanently delete</p>
+      <p id="confirmDeleteSiteName" class="text-xs font-bold text-slate-800 mb-5 truncate max-w-[220px] px-2"></p>
+      
+      <div class="flex flex-col w-full gap-2">
+        <button id="btnConfirmDelete" type="button" class="w-full py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs transition-all shadow-subtle flex items-center justify-center gap-1.5">
+          <span>Yes, Delete</span>
+          <span id="confirmDeleteSpinner" class="hidden animate-spin">⏳</span>
+        </button>
+        <button id="btnCancelDelete" type="button" class="w-full py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition-all active:scale-95">
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Host Temporary Link Modal -->
+  <div id="hostModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+    <div class="bg-white border border-slate-200/90 rounded-3xl p-5 max-w-xs w-full shadow-float text-left flex flex-col animate-in fade-in zoom-in-95 duration-150">
+      
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100 flex items-center justify-center font-bold text-sm">
+            🌐
+          </div>
+          <div>
+            <h3 class="text-xs font-bold text-slate-900">Host Temporary Link</h3>
+            <p id="hostModalSiteName" class="text-[10px] text-slate-400 truncate max-w-[170px]">App Name</p>
+          </div>
+        </div>
+        <button id="btnCloseHostModal" class="p-1 text-slate-400 hover:text-slate-700 rounded-lg">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
+      </div>
+
+      <!-- Step 1: Timer Selection View -->
+      <div id="hostStepConfig" class="flex flex-col gap-3">
+        <div>
+          <label class="block text-[11px] font-bold text-slate-700 mb-1.5">Select Expiration Time</label>
+          
+          <!-- Preset buttons -->
+          <div class="grid grid-cols-3 gap-1.5 mb-2">
+            <button type="button" class="btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all" data-minutes="15">15 Min</button>
+            <button type="button" class="btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-emerald-500 bg-emerald-50 text-emerald-700 active:scale-95 transition-all" data-minutes="60">1 Hour</button>
+            <button type="button" class="btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all" data-minutes="360">6 Hours</button>
+            <button type="button" class="btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all" data-minutes="1440">24 Hours</button>
+            <button type="button" class="btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all" data-minutes="4320">3 Days</button>
+            <button type="button" id="btnCustomPreset" class="py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all">Custom</button>
+          </div>
+
+          <!-- Manual Custom Timer Input -->
+          <div id="customTimerRow" class="hidden flex items-center gap-2 mb-1 p-2 bg-slate-50 border border-slate-200 rounded-xl">
+            <input type="number" id="inputCustomDuration" min="1" max="999" value="30" class="w-16 bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-center outline-none">
+            <select id="selectCustomUnit" class="flex-1 bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-semibold outline-none">
+              <option value="1">Minutes</option>
+              <option value="60">Hours</option>
+              <option value="1440">Days</option>
+            </select>
+          </div>
+
+          <div class="bg-amber-50 border border-amber-200/70 rounded-xl p-2.5 flex items-start gap-2">
+            <span class="text-amber-600 text-xs mt-0.5">⏱️</span>
+            <div class="text-[10px] text-amber-900 leading-tight">
+              <span class="font-bold">Expires:</span> <span id="hostExpirePreviewText">1 hour from now</span>
+              <p class="text-amber-700 mt-0.5">When time ends, viewers will see an expired notice.</p>
+            </div>
+          </div>
+        </div>
+
+        <button id="btnProceedHost" type="button" class="w-full py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs transition-all shadow-subtle flex items-center justify-center gap-1.5">
+          <span>Proceed & Generate Link</span>
+          <span id="hostProceedSpinner" class="hidden animate-spin">⏳</span>
+        </button>
+      </div>
+
+      <!-- Step 2: Generated Link Ready View -->
+      <div id="hostStepResult" class="flex flex-col gap-3 hidden">
+        <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-center">
+          <div class="text-emerald-700 font-extrabold text-xs mb-0.5">Link Hosted & Live! 🚀</div>
+          <p id="hostResultTimerBadge" class="text-[10px] text-emerald-600 font-mono">Active for next 60 minutes</p>
+        </div>
+
+        <div>
+          <label class="block text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1">Public Share Link (eidme.dev)</label>
+          <div class="flex items-center gap-1.5 bg-slate-900 text-slate-100 p-2 rounded-xl border border-slate-800">
+            <input type="text" id="inputGeneratedHostUrl" readonly class="w-full bg-transparent text-[11px] font-mono outline-none select-all text-emerald-400">
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <button id="btnCopyHostLink" type="button" class="w-full py-2.5 rounded-2xl bg-slate-900 hover:bg-slate-800 active:scale-95 text-white font-bold text-xs transition-all shadow-subtle flex items-center justify-center gap-1.5">
+            <span>📋 Copy Public Link</span>
+          </button>
+          <a id="btnTestHostLink" href="#" target="_blank" class="w-full py-2 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs text-center transition-all">
+            Open & Test Now ↗
+          </a>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed top-5 z-50 transform -translate-y-16 opacity-0 transition-all duration-300 pointer-events-none bg-slate-900/95 backdrop-blur-md text-white text-xs px-4 py-2.5 rounded-2xl shadow-float flex items-center gap-2 border border-slate-700/80">
+    <span id="toastIcon">✨</span>
+    <span id="toastMsg" class="font-medium">Notice</span>
+  </div>
+
+  <script>
+    // Studio Inputs
+    const inputTitle = document.getElementById('inputTitle');
+    const inputIconUrl = document.getElementById('inputIconUrl');
+    const iconMiniImg = document.getElementById('iconMiniImg');
+    const iconMiniPlaceholder = document.getElementById('iconMiniPlaceholder');
+    const inputColorPicker = document.getElementById('inputColorPicker');
+    const inputThemeColor = document.getElementById('inputThemeColor');
+    const inputCode = document.getElementById('inputCode');
+    const codeCharCounter = document.getElementById('codeCharCounter');
+    
+    // Strict Paste and Delete buttons only
+    const btnPasteCode = document.getElementById('btnPasteCode');
+    const btnDeleteCode = document.getElementById('btnDeleteCode');
+
+    // Trigger Buttons
+    const btnCreateApp = document.getElementById('btnCreateApp');
+    const btnCreateTempApp = document.getElementById('btnCreateTempApp');
+    const btnCreateText = document.getElementById('btnCreateText');
+    const btnCreateIcon = document.getElementById('btnCreateIcon');
+    const btnCreateSpinner = document.getElementById('btnCreateSpinner');
+    const btnTempSpinner = document.getElementById('btnTempSpinner');
+    const btnClearCurrent = document.getElementById('btnClearCurrent');
+
+    // Navigation & Tabs
+    const tabButtons = document.querySelectorAll('.bottom-tab-btn');
+    const tabViews = document.querySelectorAll('.tab-view');
+
+    // Sites Tab Elements
+    const sitesListContainer = document.getElementById('sitesListContainer');
+    const noSitesEmptyState = document.getElementById('noSitesEmptyState');
+    const emptyStateIcon = document.getElementById('emptyStateIcon');
+    const emptyStateTitle = document.getElementById('emptyStateTitle');
+    const emptyStateDesc = document.getElementById('emptyStateDesc');
+    const btnEmptyGoCreate = document.getElementById('btnEmptyGoCreate');
+    const btnSyncTurso = document.getElementById('btnSyncTurso');
+
+    // Segmented Filters
+    const tabFilterSaved = document.getElementById('tabFilterSaved');
+    const tabFilterTemp = document.getElementById('tabFilterTemp');
+    const countSavedBadge = document.getElementById('countSavedBadge');
+    const countTempBadge = document.getElementById('countTempBadge');
+
+    // Modal Elements
+    const modalOverlay = document.getElementById('modalOverlay');
+    const modalBadge = document.getElementById('modalBadge');
+    const modalAppTitle = document.getElementById('modalAppTitle');
+    const modalAppDesc = document.getElementById('modalAppDesc');
+    const modalIconImg = document.getElementById('modalIconImg');
+    const modalIconFallback = document.getElementById('modalIconFallback');
+    const btnModalOpen = document.getElementById('btnModalOpen');
+    const btnModalClose = document.getElementById('btnModalClose');
+
+    // Delete Confirmation Modal Elements
+    const confirmDeleteModal = document.getElementById('confirmDeleteModal');
+    const confirmDeleteSiteName = document.getElementById('confirmDeleteSiteName');
+    const btnConfirmDelete = document.getElementById('btnConfirmDelete');
+    const btnCancelDelete = document.getElementById('btnCancelDelete');
+    const confirmDeleteSpinner = document.getElementById('confirmDeleteSpinner');
+    let siteIdToDelete = null;
+
+    // Host Modal Elements
+    const hostModal = document.getElementById('hostModal');
+    const hostModalSiteName = document.getElementById('hostModalSiteName');
+    const btnCloseHostModal = document.getElementById('btnCloseHostModal');
+    const hostStepConfig = document.getElementById('hostStepConfig');
+    const hostStepResult = document.getElementById('hostStepResult');
+    const btnTimePresets = document.querySelectorAll('.btn-time-preset');
+    const btnCustomPreset = document.getElementById('btnCustomPreset');
+    const customTimerRow = document.getElementById('customTimerRow');
+    const inputCustomDuration = document.getElementById('inputCustomDuration');
+    const selectCustomUnit = document.getElementById('selectCustomUnit');
+    const hostExpirePreviewText = document.getElementById('hostExpirePreviewText');
+    const btnProceedHost = document.getElementById('btnProceedHost');
+    const hostProceedSpinner = document.getElementById('hostProceedSpinner');
+    const inputGeneratedHostUrl = document.getElementById('inputGeneratedHostUrl');
+    const btnCopyHostLink = document.getElementById('btnCopyHostLink');
+    const btnTestHostLink = document.getElementById('btnTestHostLink');
+    const hostResultTimerBadge = document.getElementById('hostResultTimerBadge');
+
+    let activeHostSiteId = null;
+    let selectedDurationMinutes = 60; // Default: 1 Hour
+    let currentHostGeneratedLink = '';
+
+    function updateExpirePreview() {
+      const now = new Date();
+      const expireTime = new Date(now.getTime() + selectedDurationMinutes * 60 * 1000);
+      hostExpirePreviewText.textContent = `${expireTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${selectedDurationMinutes >= 60 ? (selectedDurationMinutes / 60).toFixed(1).replace('.0','') + ' hr' : selectedDurationMinutes + ' min'})`;
+    }
+
+    btnTimePresets.forEach(btn => {
+      btn.addEventListener('click', () => {
+        btnTimePresets.forEach(b => {
+          b.className = "btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all";
+        });
+        btnCustomPreset.className = "py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all";
+        customTimerRow.classList.add('hidden');
+
+        btn.className = "btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-emerald-500 bg-emerald-50 text-emerald-700 active:scale-95 transition-all";
+        selectedDurationMinutes = Number(btn.getAttribute('data-minutes')) || 60;
+        updateExpirePreview();
+      });
+    });
+
+    btnCustomPreset.addEventListener('click', () => {
+      btnTimePresets.forEach(b => {
+        b.className = "btn-time-preset py-1.5 px-1 rounded-xl text-[11px] font-bold border border-slate-200 bg-slate-50 text-slate-700 active:scale-95 transition-all";
+      });
+      btnCustomPreset.className = "py-1.5 px-1 rounded-xl text-[11px] font-bold border border-emerald-500 bg-emerald-50 text-emerald-700 active:scale-95 transition-all";
+      customTimerRow.classList.remove('hidden');
+      
+      const val = Math.max(1, Number(inputCustomDuration.value) || 1);
+      const unit = Number(selectCustomUnit.value) || 1;
+      selectedDurationMinutes = val * unit;
+      updateExpirePreview();
+    });
+
+    function handleCustomInput() {
+      const val = Math.max(1, Number(inputCustomDuration.value) || 1);
+      const unit = Number(selectCustomUnit.value) || 1;
+      selectedDurationMinutes = val * unit;
+      updateExpirePreview();
+    }
+
+    inputCustomDuration.addEventListener('input', handleCustomInput);
+    selectCustomUnit.addEventListener('change', handleCustomInput);
+
+    function openHostModal(siteId, siteName) {
+      activeHostSiteId = siteId;
+      hostModalSiteName.textContent = siteName;
+      hostStepConfig.classList.remove('hidden');
+      hostStepResult.classList.add('hidden');
+      selectedDurationMinutes = 60;
+      updateExpirePreview();
+      hostModal.classList.remove('hidden');
+    }
+
+    btnCloseHostModal.addEventListener('click', () => {
+      hostModal.classList.add('hidden');
+      activeHostSiteId = null;
+    });
+
+    hostModal.addEventListener('click', (e) => {
+      if (e.target === hostModal) {
+        hostModal.classList.add('hidden');
+        activeHostSiteId = null;
+      }
+    });
+
+    btnProceedHost.addEventListener('click', async () => {
+      if (!activeHostSiteId) return;
+
+      btnProceedHost.disabled = true;
+      hostProceedSpinner.classList.remove('hidden');
+
+      try {
+        await ensureTableExists();
+
+        // Generate clean random token
+        const randomSlug = Math.random().toString(36).substring(2, 10);
+        const token = `eid-${randomSlug}`;
+        const expiresAt = Date.now() + (selectedDurationMinutes * 60 * 1000);
+
+        // Store into Turso hosted_links table
+        await queryTurso(
+          `INSERT INTO hosted_links (token, app_id, expires_at, created_at) VALUES (?, ?, ?, ?);`,
+          [token, activeHostSiteId, expiresAt, Date.now()]
+        );
+
+        // Determine destination link: supports requested www.eidme.dev and active deployment URL
+        const base = getNormalizedBasePath();
+        const activeUrl = `${base}?link=${encodeURIComponent(token)}`;
+        const eidmeUrl = `https://www.eidme.dev/?link=${encodeURIComponent(token)}`;
+
+        // If running directly on eidme.dev, use that; otherwise give active working link
+        currentHostGeneratedLink = window.location.hostname.includes('eidme.dev') ? eidmeUrl : activeUrl;
+
+        inputGeneratedHostUrl.value = currentHostGeneratedLink;
+        btnTestHostLink.href = activeUrl;
+        hostResultTimerBadge.textContent = `Valid until ${new Date(expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+        // Automatically copy link immediately to clipboard
+        try {
+          const tempInput = document.createElement('textarea');
+          tempInput.value = currentHostGeneratedLink;
+          document.body.appendChild(tempInput);
+          tempInput.select();
+          document.execCommand('copy');
+          document.body.removeChild(tempInput);
+        } catch (e) {}
+
+        hostStepConfig.classList.add('hidden');
+        hostStepResult.classList.remove('hidden');
+        showToast('Link generated & copied!', '📋');
+
+      } catch (err) {
+        console.error("Hosting failed:", err);
+        showToast('Hosting error: ' + err.message, '⚠️');
+      } finally {
+        btnProceedHost.disabled = false;
+        hostProceedSpinner.classList.add('hidden');
+      }
+    });
+
+    btnCopyHostLink.addEventListener('click', () => {
+      if (!currentHostGeneratedLink) return;
+      const tempInput = document.createElement('textarea');
+      tempInput.value = currentHostGeneratedLink;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      try {
+        document.execCommand('copy');
+        showToast('Copied to clipboard!', '📋');
+      } catch (e) {
+        showToast('Please copy manually', '⚠️');
+      }
+      document.body.removeChild(tempInput);
+    });
+
+    // State Variables
+    let currentFilter = 'saved'; // 'saved' or 'temp'
+    let allSites = [];
+    let currentGeneratedUrl = '';
+
+    inputColorPicker.addEventListener('input', () => {
+      inputThemeColor.value = inputColorPicker.value;
+    });
+
+    inputThemeColor.addEventListener('input', () => {
+      const val = inputThemeColor.value.trim();
+      if (/^#[0-9A-Fa-f]{6}$/.test(val)) {
+        inputColorPicker.value = val;
+      }
+    });
+
+    inputIconUrl.addEventListener('input', () => {
+      let url = inputIconUrl.value.trim();
+      if (url.startsWith('http://')) {
+        url = url.replace('http://', 'https://');
+      }
+      if (url) {
+        iconMiniImg.src = url;
+        iconMiniImg.onload = () => {
+          iconMiniImg.classList.remove('hidden');
+          iconMiniPlaceholder.classList.add('hidden');
+        };
+        iconMiniImg.onerror = () => {
+          iconMiniImg.classList.add('hidden');
+          iconMiniPlaceholder.classList.remove('hidden');
+        };
+      } else {
+        iconMiniImg.src = '';
+        iconMiniImg.classList.add('hidden');
+        iconMiniPlaceholder.classList.remove('hidden');
+      }
+    });
+
+    function updateCodeCounter() {
+      const len = inputCode.value.length;
+      codeCharCounter.textContent = `(${len.toLocaleString()} chars)`;
+    }
+
+    btnPasteCode.addEventListener('click', async () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          const text = await navigator.clipboard.readText();
+          if (text) {
+            inputCode.value = text;
+            updateCodeCounter();
+            showToast('Code pasted from clipboard!', '📋');
+            return;
+          }
+        }
+      } catch (err) {
+        // Fallback prompt for browsers restricting direct async clipboard read
+      }
+      
+      // Fallback
+      inputCode.removeAttribute('readonly');
+      inputCode.focus();
+      inputCode.select();
+      showToast('Press Paste (Ctrl+V / Tap Paste)', '📋');
+      setTimeout(() => {
+        inputCode.setAttribute('readonly', 'true');
+        updateCodeCounter();
+      }, 3000);
+    });
+
+    btnDeleteCode.addEventListener('click', () => {
+      if (!inputCode.value) {
+        showToast('Workspace is already empty', 'ℹ️');
+        return;
+      }
+      inputCode.value = '';
+      updateCodeCounter();
+      showToast('Code deleted from workspace', '🗑️');
+    });
+
+    btnClearCurrent.addEventListener('click', () => {
+      inputTitle.value = '';
+      inputIconUrl.value = '';
+      iconMiniImg.src = '';
+      iconMiniImg.classList.add('hidden');
+      iconMiniPlaceholder.classList.remove('hidden');
+      inputThemeColor.value = '#0f172a';
+      inputColorPicker.value = '#0f172a';
+      inputCode.value = '';
+      updateCodeCounter();
+      showToast('Workspace reset', '✨');
+    });
+
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetViewId = btn.getAttribute('data-tab');
+
+        tabViews.forEach(view => {
+          view.classList.add('hidden');
+        });
+
+        const activeView = document.getElementById(targetViewId);
+        if (activeView) activeView.classList.remove('hidden');
+
+        tabButtons.forEach(b => {
+          b.className = 'bottom-tab-btn flex flex-col items-center justify-center text-slate-400 hover:text-slate-700 font-semibold active:scale-95 transition-all';
+        });
+
+        btn.className = 'bottom-tab-btn flex flex-col items-center justify-center text-slate-900 font-bold active:scale-95 transition-all';
+
+        if (targetViewId === 'viewSites') {
+          loadSitesFromTurso();
+        }
+      });
+    });
+
+    btnEmptyGoCreate.addEventListener('click', () => {
+      const studioTab = document.querySelector('[data-tab="viewStudio"]');
+      if (studioTab) studioTab.click();
+    });
+
+    tabFilterSaved.addEventListener('click', () => {
+      currentFilter = 'saved';
+      tabFilterSaved.className = 'flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 bg-white text-slate-900 shadow-subtle';
+      tabFilterTemp.className = 'flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 text-slate-500 hover:text-slate-800';
+      renderSitesList();
+    });
+
+    tabFilterTemp.addEventListener('click', () => {
+      currentFilter = 'temp';
+      tabFilterTemp.className = 'flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 bg-white text-slate-900 shadow-subtle';
+      tabFilterSaved.className = 'flex-1 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center justify-center gap-1.5 text-slate-500 hover:text-slate-800';
+      renderSitesList();
+    });
+
+    function showToast(message, icon = '✨') {
+      const toast = document.getElementById('toast');
+      const toastMsg = document.getElementById('toastMsg');
+      const toastIcon = document.getElementById('toastIcon');
+      toastMsg.textContent = message;
+      toastIcon.textContent = icon;
+      toast.classList.remove('-translate-y-16', 'opacity-0');
+      toast.classList.add('translate-y-0', 'opacity-100');
+
+      setTimeout(() => {
+        toast.classList.remove('translate-y-0', 'opacity-100');
+        toast.classList.add('-translate-y-16', 'opacity-0');
+      }, 2400);
+    }
+
+    function getNormalizedBasePath() {
+      let path = window.location.pathname;
+      if (!path.endsWith('/') && !path.split('/').pop().includes('.')) {
+        path += '/';
+      }
+      return `${window.location.origin}${path}`;
+    }
+
+    async function loadSitesFromTurso() {
+      try {
+        await ensureTableExists();
+        const res = await queryTurso("SELECT id, name, icon, color, is_temp, created_at FROM apps ORDER BY created_at DESC;");
+
+        if (res && res.rows) {
+          allSites = res.rows.map(r => ({
+            id: r[0]?.value || '',
+            name: r[1]?.value || 'App',
+            icon: r[2]?.value || '',
+            color: r[3]?.value || '#0f172a',
+            isTemp: r[4]?.value === "1" || r[4]?.value === 1,
+            createdAt: Number(r[5]?.value) || 0
+          }));
+        } else {
+          allSites = [];
+        }
+
+        renderSitesList();
+      } catch (err) {
+        console.error("Failed to load sites:", err);
+        showToast("Error loading sites: " + err.message, "⚠️");
+      }
+    }
+
+    function renderSitesList() {
+      const savedSites = allSites.filter(s => !s.isTemp);
+      const tempSites = allSites.filter(s => s.isTemp);
+
+      countSavedBadge.textContent = savedSites.length;
+      countTempBadge.textContent = tempSites.length;
+
+      const activeList = currentFilter === 'saved' ? savedSites : tempSites;
+
+      sitesListContainer.innerHTML = '';
+
+      if (activeList.length === 0) {
+        noSitesEmptyState.classList.remove('hidden');
+        if (currentFilter === 'saved') {
+          emptyStateIcon.textContent = '☁️';
+          emptyStateTitle.textContent = 'No Saved Cloud Sites';
+          emptyStateDesc.textContent = 'Apps saved to Turso will show here permanently.';
+        } else {
+          emptyStateIcon.textContent = '⚡';
+          emptyStateTitle.textContent = 'No Temporary Sites';
+          emptyStateDesc.textContent = 'Click "Add Temp Site" in Studio to test quick temporary apps.';
+        }
+        return;
+      }
+
+      noSitesEmptyState.classList.add('hidden');
+
+      const base = getNormalizedBasePath();
+
+      activeList.forEach(site => {
+        const card = document.createElement('div');
+        card.className = "bg-white border border-slate-200/80 rounded-2xl p-3.5 flex items-center justify-between shadow-subtle hover:border-slate-300 transition-all";
+
+        const paramKey = site.isTemp ? 'temp' : 'app';
+        const targetUrl = `${base}?${paramKey}=${encodeURIComponent(site.id)}`;
+
+        const iconEl = site.icon 
+          ? `<img src="${site.icon}" class="w-full h-full object-cover" onerror="this.onerror=null;this.parentElement.innerHTML='⚡';">`
+          : `<span class="text-xs font-bold">${site.isTemp ? '⚡' : '🚀'}</span>`;
+
+        card.innerHTML = `
+          <div class="flex items-center gap-3 min-w-0 pr-2">
+            <div class="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 text-white overflow-hidden shadow-xs" style="background-color: ${site.color || '#0f172a'}">
+              ${iconEl}
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5">
+                <h4 class="text-xs font-bold text-slate-900 truncate">${site.name}</h4>
+                ${site.isTemp ? '<span class="text-[9px] font-bold uppercase tracking-wider bg-amber-50 text-amber-600 px-1.5 py-0.2 rounded border border-amber-200">Temp</span>' : ''}
+              </div>
+              <p class="text-[10px] text-slate-400 font-mono mt-0.5 truncate">${site.id}</p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button class="btn-host-site px-2.5 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100/90 text-emerald-700 border border-emerald-200/90 font-bold text-[11px] active:scale-95 transition-all shadow-subtle flex items-center gap-1" data-id="${site.id}" data-name="${site.name.replace(/"/g, '&quot;')}" title="Host Temporary Link">
+              <span>Host</span>
+              <span class="text-[10px]">🌐</span>
+            </button>
+            <a href="${targetUrl}" target="_blank" class="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-[11px] active:scale-95 transition-all shadow-subtle flex items-center gap-1">
+              <span>Run</span>
+              <span>↗</span>
+            </a>
+            <button class="btn-delete-site p-1.5 text-slate-400 hover:text-rose-500 rounded-xl hover:bg-rose-50 transition-colors" data-id="${site.id}" data-name="${site.name.replace(/"/g, '&quot;')}" title="Delete from Turso">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+            </button>
+          </div>
+        `;
+
+        sitesListContainer.appendChild(card);
+      });
+
+      sitesListContainer.querySelectorAll('.btn-host-site').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const siteId = btn.getAttribute('data-id');
+          const siteName = btn.getAttribute('data-name') || 'App';
+          openHostModal(siteId, siteName);
+        });
+      });
+
+      sitesListContainer.querySelectorAll('.btn-delete-site').forEach(btn => {
+        btn.addEventListener('click', () => {
+          siteIdToDelete = btn.getAttribute('data-id');
+          const siteName = btn.getAttribute('data-name') || 'this site';
+          confirmDeleteSiteName.textContent = `"${siteName}"`;
+          confirmDeleteModal.classList.remove('hidden');
+        });
+      });
+    }
+
+    btnCancelDelete.addEventListener('click', () => {
+      confirmDeleteModal.classList.add('hidden');
+      siteIdToDelete = null;
+    });
+
+    confirmDeleteModal.addEventListener('click', (e) => {
+      if (e.target === confirmDeleteModal) {
+        confirmDeleteModal.classList.add('hidden');
+        siteIdToDelete = null;
+      }
+    });
+
+    btnConfirmDelete.addEventListener('click', async () => {
+      if (!siteIdToDelete) return;
+
+      btnConfirmDelete.disabled = true;
+      confirmDeleteSpinner.classList.remove('hidden');
+
+      try {
+        await queryTurso("DELETE FROM apps WHERE id = ?;", [siteIdToDelete]);
+        
+        // Remove associated hosted links if any
+        try {
+          await queryTurso("DELETE FROM hosted_links WHERE app_id = ?;", [siteIdToDelete]);
+        } catch (e) {}
+
+        allSites = allSites.filter(s => s.id !== siteIdToDelete);
+        renderSitesList();
+        showToast("Site permanently deleted", "🗑️");
+        confirmDeleteModal.classList.add('hidden');
+      } catch (err) {
+        console.error("Delete error:", err);
+        showToast("Delete failed: " + err.message, "⚠️");
+      } finally {
+        btnConfirmDelete.disabled = false;
+        confirmDeleteSpinner.classList.add('hidden');
+        siteIdToDelete = null;
+      }
+    });
+
+    btnSyncTurso.addEventListener('click', () => {
+      loadSitesFromTurso();
+      showToast('Synced with Turso cloud', '🔄');
+    });
+
+    btnModalClose.addEventListener('click', () => {
+      modalOverlay.classList.add('hidden');
+    });
+
+    modalOverlay.addEventListener('click', (e) => {
+      if (e.target === modalOverlay) modalOverlay.classList.add('hidden');
+    });
+
+    btnCreateApp.addEventListener('click', async () => {
+      const title = inputTitle.value.trim();
+      let iconUrl = inputIconUrl.value.trim();
+      const themeColor = inputThemeColor.value.trim() || '#0f172a';
+      const code = inputCode.value;
+
+      if (!title) {
+        showToast('Please enter an App Name', '⚠️');
+        inputTitle.focus();
+        return;
+      }
+
+      if (!code.trim()) {
+        showToast('Workspace is empty. Click Paste first!', '⚠️');
+        return;
+      }
+
+      if (iconUrl.startsWith('http://')) {
+        iconUrl = iconUrl.replace('http://', 'https://');
+      }
+
+      const baseSlug = title.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'app';
+      const randomSuffix = Math.random().toString(36).substring(2, 6);
+      const appId = `${baseSlug}-${randomSuffix}`;
+
+      btnCreateApp.disabled = true;
+      btnCreateText.textContent = "Saving...";
+      btnCreateSpinner.classList.remove('hidden');
+
+      try {
+        await ensureTableExists();
+        await queryTurso(
+          `INSERT OR REPLACE INTO apps (id, name, icon, color, code, is_temp, created_at) VALUES (?, ?, ?, ?, ?, 0, ?);`,
+          [appId, title, iconUrl, themeColor, code, Date.now()]
+        );
+
+        const base = getNormalizedBasePath();
+        currentGeneratedUrl = `${base}?app=${encodeURIComponent(appId)}`;
+
+        modalBadge.textContent = "Saved to Turso Cloud";
+        modalBadge.className = "text-[10px] font-bold uppercase tracking-wider text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full mb-1";
+        modalAppTitle.textContent = title;
+        modalAppDesc.textContent = "Saved in Cloud database. Ready to run anytime.";
+        btnModalOpen.href = currentGeneratedUrl;
+
+        if (iconUrl) {
+          modalIconImg.src = iconUrl;
+          modalIconImg.classList.remove('hidden');
+          modalIconFallback.classList.add('hidden');
+        } else {
+          modalIconImg.classList.add('hidden');
+          modalIconFallback.classList.remove('hidden');
+        }
+
+        modalOverlay.classList.remove('hidden');
+        showToast('App saved to Turso!', '🚀');
+
+        loadSitesFromTurso();
+
+      } catch (err) {
+        console.error("Save error:", err);
+        showToast(`Error: ${err.message}`, '⚠️');
+      } finally {
+        btnCreateApp.disabled = false;
+        btnCreateText.textContent = "Save to Cloud";
+        btnCreateSpinner.classList.add('hidden');
+      }
+    });
+
+    btnCreateTempApp.addEventListener('click', async () => {
+      const code = inputCode.value;
+      if (!code.trim()) {
+        showToast('Workspace is empty. Click Paste first!', '⚠️');
+        return;
+      }
+
+      let iconUrl = inputIconUrl.value.trim();
+      const themeColor = inputThemeColor.value.trim() || '#0f172a';
+
+      btnCreateTempApp.disabled = true;
+      btnTempSpinner.classList.remove('hidden');
+
+      try {
+        await ensureTableExists();
+
+        // Calculate next temp number
+        const tempCheck = await queryTurso("SELECT count(*) FROM apps WHERE is_temp = 1;");
+        let tempIndex = 1;
+        if (tempCheck && tempCheck.rows && tempCheck.rows[0]) {
+          tempIndex = (Number(tempCheck.rows[0][0]?.value) || 0) + 1;
+        }
+
+        const autoTempName = `temp ${tempIndex}`;
+        const tempId = `temp-${tempIndex}-${Math.random().toString(36).substring(2, 6)}`;
+
+        await queryTurso(
+          `INSERT OR REPLACE INTO apps (id, name, icon, color, code, is_temp, created_at) VALUES (?, ?, ?, ?, ?, 1, ?);`,
+          [tempId, autoTempName, iconUrl, themeColor, code, Date.now()]
+        );
+
+        const base = getNormalizedBasePath();
+        currentGeneratedUrl = `${base}?temp=${encodeURIComponent(tempId)}`;
+
+        modalBadge.textContent = "Temporary Site";
+        modalBadge.className = "text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full mb-1";
+        modalAppTitle.textContent = autoTempName;
+        modalAppDesc.textContent = "Temporary site saved in Turso. Ready to test & host.";
+        btnModalOpen.href = currentGeneratedUrl;
+
+        if (iconUrl) {
+          modalIconImg.src = iconUrl;
+          modalIconImg.classList.remove('hidden');
+          modalIconFallback.classList.add('hidden');
+        } else {
+          modalIconImg.classList.add('hidden');
+          modalIconFallback.classList.remove('hidden');
+        }
+
+        modalOverlay.classList.remove('hidden');
+        showToast(`Created ${autoTempName}!`, '⚡');
+
+        loadSitesFromTurso();
+
+      } catch (err) {
+        console.error("Temp creation error:", err);
+        showToast(`Error: ${err.message}`, '⚠️');
+      } finally {
+        btnCreateTempApp.disabled = false;
+        btnTempSpinner.classList.add('hidden');
+      }
+    });
+
+    // Initial Load of Sites from Turso
+    loadSitesFromTurso();
+  </script>
+</body>
+</html>
